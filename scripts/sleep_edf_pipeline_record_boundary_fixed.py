@@ -1,43 +1,72 @@
-"""Sleep-EDF sleep staging pipeline exported from the project notebook.
+"""Sleep-EDF BSPC final strengthened pipeline.
 
-This script is a linear export intended for version control and reproducible execution.
-For interactive use, prefer notebooks/sleep_edf_pipeline_record_boundary_fixed.ipynb.
+Linear Python export of notebooks/sleep_edf_pipeline_record_boundary_fixed.ipynb.
+For interactive execution and figures, prefer the notebook.
+Do not commit raw Sleep-EDF data, caches, trained models, or generated outputs.
 """
 
-# NOTE: install dependencies with: pip install -r requirements.txt
 
 
 # ==============================================================================
-# Cell 0: Sleep-EDF Sleep Staging: Lightweight, Subject-Wise, Interpretable Pipeline
+# Section: Sleep-EDF BSPC Final Strengthened Pipeline
 # ==============================================================================
 
 
-# ==============================================================================
-# Cell 1: Critical fixes applied in this version
-# ==============================================================================
-
 
 # ==============================================================================
-# Cell 2: Drive-loading adjustment
+# Section: Sleep-EDF Sleep Staging: Lightweight, Subject-Wise, Interpretable Pipeline
 # ==============================================================================
 
 
-# ==============================================================================
-# Cell 3: 0. Install Dependencies
-# ==============================================================================
-
-
-# Dependency installation was in the notebook. Use requirements.txt instead.
-
 
 # ==============================================================================
-# Cell 5: 1. Imports & Global Configuration
+# Section: Critical fixes applied in this version
 # ==============================================================================
 
+
+
+# ==============================================================================
+# Section: Fixing plan mapped to this notebook revision
+# ==============================================================================
+
+
+
+# ==============================================================================
+# Section: Drive-loading adjustment
+# ==============================================================================
+
+
+
+# ==============================================================================
+# Section: 0. Install Dependencies
+# ==============================================================================
 
 # %% [code] Cell 6
+# Install required packages
+# Run once; restart kernel if needed
+import subprocess, sys
 
-import os, re, glob, warnings, random, zipfile, shutil, time, gc
+packages = [
+    'mne', 'pyEDFlib', 'scikit-learn', 'shap',
+    'torch', 'torchvision',
+    'antropy', 'yasa',
+    'seaborn', 'matplotlib', 'pandas', 'numpy',
+    'scipy', 'tqdm', 'joblib'
+]
+
+for pkg in packages:
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pkg])
+
+print('All dependencies installed.')
+
+
+
+# ==============================================================================
+# Section: 1. Imports & Global Configuration
+# ==============================================================================
+
+# %% [code] Cell 8
+import os, re, glob, warnings, random, zipfile, shutil, time, gc, json, hashlib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -65,7 +94,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from hmmlearn import hmm
+# Custom record-aware Viterbi smoothing is implemented below; no hmmlearn dependency is required.
 
 warnings.filterwarnings('ignore')
 
@@ -80,10 +109,39 @@ if torch.cuda.is_available():
 # Deterministic-ish settings: fixed seeds plus stable CuDNN choices where practical.
 # benchmark=False improves reproducibility; set True only if speed matters more.
 torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.deterministic = True
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Device: {DEVICE}')
+
+# ── Execution profile ────────────────────────────────────────────────────────
+# BSPC final-strengthening profile.
+# This profile is intentionally heavier than a debugging run:
+#   - it rebuilds preprocessing cache once after the final parser is frozen;
+#   - it runs full subject-wise CV for all model families;
+#   - it exports per-stage metrics, split distributions, cost, repeated-seed,
+#     and channel-ablation evidence needed for a journal-style manuscript.
+#
+# After one successful final preprocessing rebuild, you may set
+# FORCE_REBUILD_CACHE=False for later analysis-only reruns.
+PAPER_RUN = True
+PAPER_RUN_DEEP_CV = True
+FORCE_REBUILD_CACHE = True
+FILTER_CONTINUOUS_BEFORE_EPOCHING = True  # Preferred signal-processing path.
+
+# Journal-strengthening extensions.
+RUN_REPEATED_SEED_CONFIRMATION = True
+REPEATED_SEEDS = [42, 123, 2026]
+REPEATED_SEED_MODELS = ['CNN-LSTM', 'Transformer']
+REPEATED_SEED_FOLDS = 'all'   # 'all' or a list such as [0] for a cheaper sensitivity check.
+REPEATED_SEED_EPOCHS = 15
+REPEATED_SEED_PATIENCE = 5
+
+RUN_CHANNEL_ABLATION_CV = True
+CHANNEL_ABLATION_MODES = ['EEG only', 'EOG only', 'EEG + EOG']
+CHANNEL_ABLATION_MODELS = ['Random Forest', '1D CNN', 'CNN-LSTM']
+CHANNEL_ABLATION_DEEP_EPOCHS = 10
+CHANNEL_ABLATION_DEEP_PATIENCE = 4
 
 # ── Google Drive + Sleep-EDF local runtime setup ─────────────────────────────
 # This pipeline now uses the same Drive location as your previous notebook:
@@ -193,7 +251,7 @@ DATA_ROOT = prepare_sleepedf_from_drive()
 DATA_DIR = DATA_ROOT  # raw EDF root used by the manifest builder
 
 print('\nDATA_ROOT:', DATA_ROOT)
-print('CACHE_DIR:', CACHE_DIR)
+print('BASE_CACHE_DIR:', CACHE_DIR)
 print('RESULTS_DIR:', RESULTS_DIR)
 print('SPLITS_DIR:', SPLITS_DIR)
 print('Top-level folders:', [p.name for p in DATA_ROOT.iterdir() if p.is_dir()])
@@ -220,17 +278,42 @@ DISCARDED_STAGE_LABELS = {'Sleep stage ?', 'Movement time'}
 STAGE_NAMES = ['W', 'N1', 'N2', 'N3', 'REM']
 N_CLASSES   = 5
 
+# Cache versioning: a new preprocessing folder is created whenever these
+# settings change. This prevents silent reuse of stale cached epochs.
+# PREPROCESSING_CODE_VERSION should be bumped whenever load_and_epoch() or
+# annotation/wake-trimming logic changes, even if the numeric configuration does not.
+PREPROCESSING_CODE_VERSION = 'bspc-final-2026-05-record-aware-v2'
+PREPROCESSING_CONFIG = {
+    'epoch_sec': EPOCH_SEC,
+    'fs': FS,
+    'wake_trim_sec': WAKE_TRIM,
+    'stage_map': STAGE_MAP,
+    'discarded_stage_labels': sorted(DISCARDED_STAGE_LABELS),
+    'filter_continuous_before_epoching': FILTER_CONTINUOUS_BEFORE_EPOCHING,
+    'bandpass_hz': [0.4, 30.0],
+    'epoch_samples': EPOCH_SAMPLES,
+    'preprocessing_code_version': PREPROCESSING_CODE_VERSION,
+}
+PREPROCESSING_HASH = hashlib.sha256(
+    json.dumps(PREPROCESSING_CONFIG, sort_keys=True).encode('utf-8')
+).hexdigest()[:10]
+
+BASE_CACHE_DIR = CACHE_DIR
+CACHE_DIR = BASE_CACHE_DIR / f'preproc_{PREPROCESSING_HASH}'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 print('\nConfiguration loaded.')
 print(f'Epoch: {EPOCH_SEC}s | FS: {FS}Hz | Folds: {N_FOLDS} | SeqLen: {SEQ_LEN}')
+print(f'Preprocessing hash: {PREPROCESSING_HASH}')
+print(f'Versioned CACHE_DIR: {CACHE_DIR}')
+
 
 
 # ==============================================================================
-# Cell 7: 2. Data Download & Manifest
+# Section: 2. Data Download & Manifest
 # ==============================================================================
 
-
-# %% [code] Cell 8
-
+# %% [code] Cell 10
 # ============================================================
 # Build manifest from local/Drive Sleep-EDF files
 # ============================================================
@@ -352,13 +435,12 @@ print(f'Manifest: {len(manifest)} nights from {manifest.subject_id.nunique()} su
 display(manifest.head(10))
 
 
+
 # ==============================================================================
-# Cell 9: 3. Subject-Wise Fold Assignment
+# Section: 3. Subject-Wise Fold Assignment
 # ==============================================================================
 
-
-# %% [code] Cell 10
-
+# %% [code] Cell 12
 from sklearn.model_selection import KFold
 
 subjects = manifest['subject_id'].unique()
@@ -395,28 +477,44 @@ for f in range(N_FOLDS):
     print(f'  Fold {f}: {n} subjects')
 
 
+
 # ==============================================================================
-# Cell 11: 4. Preprocessing & Epoch Caching
+# Section: 4. Preprocessing & Epoch Caching
 # ==============================================================================
 
+# %% [code] Cell 14
+def _npz_scalar_to_py(value):
+    """Convert np.load scalar/object arrays to plain Python values."""
+    arr = np.asarray(value)
+    if arr.shape == ():
+        return arr.item()
+    return value
 
-# %% [code] Cell 12
 
 def load_and_epoch(psg_path, hyp_path, wake_trim_sec=WAKE_TRIM, fs=FS,
                    epoch_sec=EPOCH_SEC, stage_map=STAGE_MAP):
     """
     Load one PSG night, epoch into 30 s windows, and return arrays.
 
-    Critical robustness fix:
+    Fixes retained here:
     - Only valid sleep-stage annotations are mapped.
     - Unknown / movement annotations are ignored.
-    - The event mapping is callable, so MNE does not fail when a stage label is absent
-      from a particular night.
+    - Event mapping is callable, so MNE does not fail when a stage label is absent.
+    - Filtering/resampling is performed on the continuous recording before epoching
+      when FILTER_CONTINUOUS_BEFORE_EPOCHING=True, reducing artificial 30 s edge
+      artefacts at every epoch boundary.
     """
     raw = mne.io.read_raw_edf(psg_path, preload=True, verbose=False)
-
     ann = mne.read_annotations(hyp_path)
     raw.set_annotations(ann, emit_warning=False)
+
+    # Prefer continuous preprocessing before epoch construction.
+    # Annotations remain attached to raw and MNE converts them to events after
+    # resampling, preserving sample-index alignment.
+    if FILTER_CONTINUOUS_BEFORE_EPOCHING:
+        if raw.info['sfreq'] != fs:
+            raw.resample(fs, npad='auto', verbose=False)
+        raw.filter(0.4, 30.0, picks=['eeg', 'eog'], method='iir', verbose=False)
 
     def _event_id_from_annotation(description):
         return stage_map.get(description, None)
@@ -461,10 +559,11 @@ def load_and_epoch(psg_path, hyp_path, wake_trim_sec=WAKE_TRIM, fs=FS,
     if len(y) == 0:
         raise RuntimeError(f'No epochs retained after wake trimming for {Path(psg_path).name}')
 
-    # Resample/filter after epoching to keep the labels aligned with 30 s windows.
-    if raw.info['sfreq'] != fs:
-        epochs.resample(fs, verbose=False)
-    epochs.filter(0.4, 30.0, method='iir', verbose=False)
+    # Fallback path: retained only for reproducibility comparisons with older runs.
+    if not FILTER_CONTINUOUS_BEFORE_EPOCHING:
+        if raw.info['sfreq'] != fs:
+            epochs.resample(fs, verbose=False)
+        epochs.filter(0.4, 30.0, method='iir', verbose=False)
 
     data = epochs.get_data()  # (n_epochs, n_channels, n_times)
 
@@ -490,23 +589,69 @@ def load_and_epoch(psg_path, hyp_path, wake_trim_sec=WAKE_TRIM, fs=FS,
     return X_eeg.astype(np.float32), X_eog.astype(np.float32), y.astype(np.int64)
 
 
-# ── Cache all nights ──────────────────────────────────────────────────────
-# Set True only when you intentionally want to discard previous cached epoch files.
-FORCE_REBUILD_CACHE = False
+def cache_metadata_for_row(row):
+    """Metadata stored with each cached record for stale-cache detection."""
+    return {
+        'record_id': str(row.get('record_id')),
+        'subject_id': int(row.get('subject_id')),
+        'subject_label': str(row.get('subject_label', row.get('subject_id'))),
+        'night': int(row.get('night')),
+        'subset': str(row.get('subset', '')),
+        'fold': int(row.get('fold')),
+        'preprocessing_hash': PREPROCESSING_HASH,
+        'preprocessing_config_json': json.dumps(PREPROCESSING_CONFIG, sort_keys=True),
+    }
 
+
+def cache_file_is_valid(cache_path, expected_metadata):
+    """Return True only if the cache was produced by the current preprocessing config."""
+    if not Path(cache_path).exists():
+        return False
+    try:
+        d = np.load(cache_path, allow_pickle=False)
+        if 'preprocessing_hash' not in d:
+            return False
+        cached_hash = str(_npz_scalar_to_py(d['preprocessing_hash']))
+        if cached_hash != expected_metadata['preprocessing_hash']:
+            return False
+
+        # Basic structural checks catch truncated/stale/corrupted npz files.
+        required = ['eeg', 'eog', 'labels', 'record_id', 'subject_id', 'n_epochs']
+        if any(k not in d for k in required):
+            return False
+        n = len(d['labels'])
+        if d['eeg'].shape[0] != n or d['eog'].shape[0] != n:
+            return False
+        if d['eeg'].shape[1] != EPOCH_SAMPLES or d['eog'].shape[1] != EPOCH_SAMPLES:
+            return False
+        if str(_npz_scalar_to_py(d['record_id'])) != expected_metadata['record_id']:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+# ── Cache all nights ──────────────────────────────────────────────────────
 failed = []
 processed = 0
+reused = 0
+invalidated = 0
 
 for _, row in tqdm(manifest.iterrows(), total=len(manifest), desc='Preprocessing'):
     sid, night = int(row['subject_id']), int(row['night'])
     record_id = row.get('record_id', f'S{sid:02d}_N{night}')
     cache_path = CACHE_DIR / f'{record_id}.npz'
+    expected_metadata = cache_metadata_for_row(row)
 
     if FORCE_REBUILD_CACHE and cache_path.exists():
         cache_path.unlink()
 
-    if cache_path.exists():
+    if cache_path.exists() and cache_file_is_valid(cache_path, expected_metadata):
+        reused += 1
         continue
+    elif cache_path.exists():
+        invalidated += 1
+        cache_path.unlink()
 
     try:
         X_eeg, X_eog, y = load_and_epoch(row['psg_path'], row['hyp_path'])
@@ -515,20 +660,15 @@ for _, row in tqdm(manifest.iterrows(), total=len(manifest), desc='Preprocessing
             eeg=X_eeg,
             eog=X_eog,
             labels=y,
-            subject_id=sid,
-            subject_label=str(row.get('subject_label', str(sid))),
-            night=night,
-            record_id=str(record_id),
-            subset=str(row.get('subset', '')),
-            fold=int(row['fold']),
-            n_epochs=int(len(y))
+            n_epochs=int(len(y)),
+            **expected_metadata,
         )
         processed += 1
     except Exception as e:
         failed.append((record_id, sid, night, str(e)))
         print(f'  FAILED {record_id} | subject={sid} night={night}: {e}')
 
-print(f'\nCaching complete. Newly processed: {processed}. Failed: {len(failed)}')
+print(f'\nCaching complete. Newly processed: {processed}. Reused: {reused}. Invalidated: {invalidated}. Failed: {len(failed)}')
 
 expected_records = set(manifest['record_id'].astype(str))
 cached_records = {p.stem for p in CACHE_DIR.glob('*.npz')}
@@ -552,16 +692,15 @@ if missing_records:
     )
 
 cached = sorted(CACHE_DIR.glob('*.npz'))
-print(f'Total cached files in cache directory: {len(cached)}')
+print(f'Total cached files in versioned cache directory: {len(cached)}')
+
 
 
 # ==============================================================================
-# Cell 13: 5. Data Loading Utilities
+# Section: 5. Data Loading Utilities
 # ==============================================================================
 
-
-# %% [code] Cell 14
-
+# %% [code] Cell 16
 def _npz_scalar_to_py(value):
     """Convert np.load scalar/object arrays to plain Python values."""
     arr = np.asarray(value)
@@ -571,8 +710,17 @@ def _npz_scalar_to_py(value):
 
 
 def load_cached_record(cache_path):
-    """Load one cached night as a record dictionary."""
+    """Load one cached night as a record dictionary and validate the cache hash."""
     d = np.load(cache_path, allow_pickle=False)
+    if 'preprocessing_hash' not in d:
+        raise RuntimeError(f'Cache file lacks preprocessing metadata: {cache_path}')
+    cached_hash = str(_npz_scalar_to_py(d['preprocessing_hash']))
+    if cached_hash != PREPROCESSING_HASH:
+        raise RuntimeError(
+            f'Stale cache file {cache_path}: hash={cached_hash}, expected={PREPROCESSING_HASH}. '
+            'Delete/rebuild the cache or check PREPROCESSING_CONFIG.'
+        )
+
     record = {
         'eeg': d['eeg'].astype(np.float32),
         'eog': d['eog'].astype(np.float32),
@@ -582,11 +730,29 @@ def load_cached_record(cache_path):
         'night': int(_npz_scalar_to_py(d['night'])) if 'night' in d else -1,
         'record_id': str(_npz_scalar_to_py(d['record_id'])) if 'record_id' in d else Path(cache_path).stem,
         'fold': int(_npz_scalar_to_py(d['fold'])) if 'fold' in d else -1,
+        'preprocessing_hash': cached_hash,
         'cache_path': str(cache_path),
     }
     n = len(record['labels'])
     assert record['eeg'].shape[0] == n and record['eog'].shape[0] == n, f'Shape mismatch in {cache_path}'
+    assert record['eeg'].shape[1] == EPOCH_SAMPLES and record['eog'].shape[1] == EPOCH_SAMPLES, f'Epoch length mismatch in {cache_path}'
     return record
+
+
+def assert_no_subject_overlap(train_records, val_records, test_records):
+    """Hard leakage check: subjects must be disjoint across train/validation/test."""
+    tr = {r['subject_id'] for r in train_records}
+    va = {r['subject_id'] for r in val_records}
+    te = {r['subject_id'] for r in test_records}
+    overlaps = {
+        'train_val': tr & va,
+        'train_test': tr & te,
+        'val_test': va & te,
+    }
+    bad = {k: sorted(v) for k, v in overlaps.items() if v}
+    if bad:
+        raise RuntimeError(f'Subject leakage detected across splits: {bad}')
+    return True
 
 
 def load_fold_records(fold_test, manifest, cache_dir=CACHE_DIR):
@@ -636,6 +802,7 @@ def load_fold_records(fold_test, manifest, cache_dir=CACHE_DIR):
         if len(records) == 0:
             raise RuntimeError(f'No cached records found for {split_name} split of fold {fold_test}.')
 
+    assert_no_subject_overlap(records_by_split['train'], records_by_split['val'], records_by_split['test'])
     return records_by_split['train'], records_by_split['val'], records_by_split['test']
 
 
@@ -692,7 +859,7 @@ def class_distribution(y, names=STAGE_NAMES):
     return df
 
 
-# Quick check on fold 0
+# Quick check on fold 0.
 tr_records, va_records, te_records = load_fold_records(0, manifest)
 (tr_eeg, tr_eog, tr_y) = concat_records(tr_records)
 (va_eeg, va_eog, va_y) = concat_records(va_records)
@@ -707,18 +874,18 @@ assert len(tr_y) > 0 and len(va_y) > 0 and len(te_y) > 0
 assert sum(record_lengths(tr_records)) == len(tr_y)
 assert sum(record_lengths(va_records)) == len(va_y)
 assert sum(record_lengths(te_records)) == len(te_y)
+assert_no_subject_overlap(tr_records, va_records, te_records)
 
 print('\nClass distribution (train):')
 display(class_distribution(tr_y))
 
 
+
 # ==============================================================================
-# Cell 15: 6. Feature Extraction for Random Forest Baseline
+# Section: 6. Feature Extraction for Random Forest Baseline
 # ==============================================================================
 
-
-# %% [code] Cell 16
-
+# %% [code] Cell 18
 try:
     import antropy as ant
 except ImportError:
@@ -830,13 +997,12 @@ te_feat = extract_features_batch(te_eeg, te_eog)
 print(f'Train features: {tr_feat.shape}, Test features: {te_feat.shape}')
 
 
+
 # ==============================================================================
-# Cell 17: 7. Evaluation Utilities
+# Section: 7. Evaluation Utilities
 # ==============================================================================
 
-
-# %% [code] Cell 18
-
+# %% [code] Cell 20
 def evaluate(y_true, y_pred, model_name='Model', stage_names=STAGE_NAMES):
     """Compute and display macro-F1, kappa, per-class F1, and confusion matrix."""
     labels = list(range(len(stage_names)))
@@ -896,16 +1062,307 @@ def append_metric_row(rows, fold, model, y_true, y_pred):
     })
 
 
+def per_record_metrics(y_true_concat, y_pred_concat, records, model_name):
+    """
+    Compute one row per night/record. This prevents the final interpretation from
+    depending only on epoch-pooled metrics, where longer records dominate.
+    """
+    rows = []
+    y_true_concat = np.asarray(y_true_concat)
+    y_pred_concat = np.asarray(y_pred_concat)
+
+    for rec, sl in zip(records, record_slices(records)):
+        y_t = y_true_concat[sl]
+        y_p = y_pred_concat[sl]
+        rows.append({
+            'model': model_name,
+            'record_id': rec.get('record_id', ''),
+            'subject_id': rec.get('subject_id', np.nan),
+            'subject_label': rec.get('subject_label', ''),
+            'night': rec.get('night', np.nan),
+            'n_epochs': int(len(y_t)),
+            'macro_f1': f1_score(y_t, y_p, labels=list(range(N_CLASSES)), average='macro', zero_division=0),
+            'kappa': cohen_kappa_score(y_t, y_p, labels=list(range(N_CLASSES))),
+            'accuracy': float((y_t == y_p).mean()) if len(y_t) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def summarize_record_metrics(record_metric_df):
+    """Summarise per-record metrics as mean/SD; useful alongside epoch-pooled metrics."""
+    return (record_metric_df
+            .groupby('model')
+            .agg(record_macro_f1_mean=('macro_f1', 'mean'),
+                 record_macro_f1_sd=('macro_f1', 'std'),
+                 record_kappa_mean=('kappa', 'mean'),
+                 record_kappa_sd=('kappa', 'std'),
+                 n_records=('record_id', 'count'))
+            .sort_values('record_macro_f1_mean', ascending=False)
+            .reset_index())
+
+
+def multiclass_brier_score(y_true, proba, n_classes=N_CLASSES):
+    """Mean squared error between one-hot labels and predicted class probabilities."""
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.asarray(proba, dtype=float)
+    Y = np.eye(n_classes)[y_true]
+    return float(np.mean(np.sum((proba - Y) ** 2, axis=1)))
+
+
+def expected_calibration_error(y_true, proba, n_bins=15):
+    """
+    Confidence-based multiclass ECE.
+    This is a diagnostic, not a definitive calibration proof.
+    """
+    y_true = np.asarray(y_true)
+    proba = np.asarray(proba)
+    conf = proba.max(axis=1)
+    pred = proba.argmax(axis=1)
+    correct = (pred == y_true).astype(float)
+
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    rows = []
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (conf > lo) & (conf <= hi) if hi < 1.0 else (conf > lo) & (conf <= hi)
+        if mask.sum() == 0:
+            continue
+        bin_acc = correct[mask].mean()
+        bin_conf = conf[mask].mean()
+        weight = mask.mean()
+        ece += weight * abs(bin_acc - bin_conf)
+        rows.append({
+            'bin_low': lo,
+            'bin_high': hi,
+            'n': int(mask.sum()),
+            'accuracy': float(bin_acc),
+            'confidence': float(bin_conf),
+            'abs_gap': float(abs(bin_acc - bin_conf)),
+        })
+    return float(ece), pd.DataFrame(rows)
+
+
+def align_class_proba(proba, classes, n_classes=N_CLASSES):
+    """Ensure classifier probabilities have one column per sleep-stage class."""
+    proba = np.asarray(proba)
+    classes = np.asarray(classes, dtype=int)
+    if proba.shape[1] == n_classes and np.array_equal(classes, np.arange(n_classes)):
+        return proba
+    out = np.zeros((proba.shape[0], n_classes), dtype=float)
+    for j, cls in enumerate(classes):
+        if 0 <= cls < n_classes:
+            out[:, cls] = proba[:, j]
+    row_sums = out.sum(axis=1, keepdims=True)
+    out = np.divide(out, np.maximum(row_sums, 1e-12))
+    return out
+
+
 results_log = []   # accumulate fold-0 results across models
 
+# %% [code] Cell 21
+# ============================================================
+# BSPC final-strengthening utilities
+# ============================================================
+# These utilities save the evidence needed for a journal-style manuscript:
+# fold-wise class distribution, per-stage metrics, computational cost,
+# repeated-seed sensitivity, and channel ablation.
+
+from sklearn.metrics import precision_recall_fscore_support
+import tempfile
+import os
+import time
+
+def set_global_seed(seed):
+    """Set Python, NumPy, and PyTorch seeds for a reproducible training attempt."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def torch_generator_for(seed):
+    """Return a seeded torch.Generator for deterministic DataLoader shuffling."""
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+    return g
+
+
+def model_num_parameters(model):
+    """Number of trainable parameters."""
+    if model is None:
+        return np.nan
+    return int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+
+def model_size_mb(model):
+    """
+    Approximate PyTorch model parameter size in megabytes.
+    This is parameter tensor size, not full checkpoint size.
+    """
+    if model is None:
+        return np.nan
+    return float(sum(p.numel() * p.element_size() for p in model.parameters()) / 1e6)
+
+
+def sklearn_object_size_mb(obj):
+    """Approximate serialized size of a scikit-learn object in megabytes."""
+    try:
+        return float(len(pickle.dumps(obj)) / 1e6)
+    except Exception:
+        return np.nan
+
+
+def timed_predict_proba_torch(model, loader):
+    """Run predict_proba and return probabilities plus wall-clock inference seconds."""
+    start = time.perf_counter()
+    proba, y = predict_proba(model, loader)
+    infer_seconds = time.perf_counter() - start
+    return proba, y, infer_seconds
+
+
+def append_per_class_rows(rows, fold, model, y_true, y_pred, split='test', seed=SEED):
+    """Append one precision/recall/F1/support row per sleep stage."""
+    p, r, f1, support = precision_recall_fscore_support(
+        y_true, y_pred,
+        labels=list(range(N_CLASSES)),
+        zero_division=0
+    )
+    for i, stage in enumerate(STAGE_NAMES):
+        rows.append({
+            'seed': int(seed),
+            'fold': int(fold),
+            'split': split,
+            'model': model,
+            'stage': stage,
+            'precision': float(p[i]),
+            'recall': float(r[i]),
+            'f1': float(f1[i]),
+            'support': int(support[i]),
+        })
+
+
+def append_split_distribution_rows(rows, fold, split_name, y, records=None):
+    """
+    Append stage counts and proportions for a split in a given fold.
+    Records are optional but used to report subject/record counts.
+    """
+    y = np.asarray(y, dtype=int)
+    counts = np.bincount(y[y >= 0], minlength=N_CLASSES)
+    n_epochs = int(counts.sum())
+    n_records = len(records) if records is not None else np.nan
+    n_subjects = len({str(r.get('subject_id')) for r in records}) if records is not None else np.nan
+    for class_id, stage in enumerate(STAGE_NAMES):
+        rows.append({
+            'fold': int(fold),
+            'split': split_name,
+            'stage': stage,
+            'class_id': int(class_id),
+            'n_epochs': int(counts[class_id]),
+            'proportion': float(counts[class_id] / n_epochs) if n_epochs else np.nan,
+            'total_epochs_in_split': n_epochs,
+            'n_records_in_split': int(n_records) if not pd.isna(n_records) else np.nan,
+            'n_subjects_in_split': int(n_subjects) if not pd.isna(n_subjects) else np.nan,
+        })
+
+
+def append_cost_row(rows, fold, model, train_seconds=np.nan, inference_seconds=np.nan,
+                    n_train_epochs=np.nan, n_test_epochs=np.nan, n_parameters=np.nan,
+                    model_size_mb_value=np.nan, device=None, seed=SEED, notes=''):
+    rows.append({
+        'seed': int(seed),
+        'fold': int(fold),
+        'model': model,
+        'train_seconds': float(train_seconds) if not pd.isna(train_seconds) else np.nan,
+        'inference_seconds': float(inference_seconds) if not pd.isna(inference_seconds) else np.nan,
+        'n_train_epochs': int(n_train_epochs) if not pd.isna(n_train_epochs) else np.nan,
+        'n_test_epochs': int(n_test_epochs) if not pd.isna(n_test_epochs) else np.nan,
+        'n_parameters': int(n_parameters) if not pd.isna(n_parameters) else np.nan,
+        'model_size_mb': float(model_size_mb_value) if not pd.isna(model_size_mb_value) else np.nan,
+        'device': str(device or DEVICE),
+        'notes': notes,
+    })
+
+
+def append_hmm_tradeoff_row(rows, fold, base_model, y_true, base_pred, smoothed_pred, records, seed=SEED):
+    """
+    HMM is reported as a trade-off: classification metrics and large-jump counts
+    are both saved. The manuscript should only claim improvement for the specific
+    metric/model combination where the saved delta is positive.
+    """
+    base_mf1 = f1_score(y_true, base_pred, labels=list(range(N_CLASSES)), average='macro', zero_division=0)
+    smooth_mf1 = f1_score(y_true, smoothed_pred, labels=list(range(N_CLASSES)), average='macro', zero_division=0)
+    base_kappa = cohen_kappa_score(y_true, base_pred, labels=list(range(N_CLASSES)))
+    smooth_kappa = cohen_kappa_score(y_true, smoothed_pred, labels=list(range(N_CLASSES)))
+    base_acc = float((np.asarray(y_true) == np.asarray(base_pred)).mean())
+    smooth_acc = float((np.asarray(y_true) == np.asarray(smoothed_pred)).mean())
+    base_large_jumps = count_illegal_by_records(base_pred, records)
+    smooth_large_jumps = count_illegal_by_records(smoothed_pred, records)
+    rows.append({
+        'seed': int(seed),
+        'fold': int(fold),
+        'base_model': base_model,
+        'smoothed_model': f'{base_model} + HMM',
+        'macro_f1_before': float(base_mf1),
+        'macro_f1_after': float(smooth_mf1),
+        'macro_f1_delta_after_minus_before': float(smooth_mf1 - base_mf1),
+        'kappa_before': float(base_kappa),
+        'kappa_after': float(smooth_kappa),
+        'kappa_delta_after_minus_before': float(smooth_kappa - base_kappa),
+        'accuracy_before': float(base_acc),
+        'accuracy_after': float(smooth_acc),
+        'accuracy_delta_after_minus_before': float(smooth_acc - base_acc),
+        'large_jump_transitions_before': int(base_large_jumps),
+        'large_jump_transitions_after': int(smooth_large_jumps),
+        'large_jump_delta_after_minus_before': int(smooth_large_jumps - base_large_jumps),
+        'interpretation_note': (
+            'Large-jump transition count is a plausibility heuristic, not a formal clinical impossibility rule.'
+        )
+    })
+
+
+def apply_channel_mode(eeg, eog, mode):
+    """
+    Return EEG/EOG arrays according to a channel-ablation mode.
+    EEG-only and EOG-only keep the same two-input interface by zeroing the omitted channel.
+    """
+    eeg = np.asarray(eeg)
+    eog = np.asarray(eog)
+    zeros_eeg = np.zeros_like(eeg)
+    zeros_eog = np.zeros_like(eog)
+    if mode == 'EEG only':
+        return eeg, zeros_eog
+    if mode == 'EOG only':
+        return zeros_eeg, eog
+    if mode == 'EEG + EOG':
+        return eeg, eog
+    raise ValueError(f'Unknown channel mode: {mode}')
+
+
+def records_with_channel_mode(records, mode):
+    """Shallow-copy record dictionaries while replacing EEG/EOG arrays for ablation."""
+    out = []
+    for rec in records:
+        rec2 = dict(rec)
+        rec2['eeg'], rec2['eog'] = apply_channel_mode(rec['eeg'], rec['eog'], mode)
+        out.append(rec2)
+    return out
+
+
+def save_many_csv(prefix, **named_frames):
+    """Save multiple DataFrames with consistent filenames."""
+    for name, df in named_frames.items():
+        if df is not None and len(df) > 0:
+            Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(df).to_csv(RESULTS_DIR / f'{prefix}_{name}.csv', index=False)
+
+
 
 # ==============================================================================
-# Cell 19: 8. Random Forest Baseline + SHAP
+# Section: 8. Random Forest Baseline + SHAP
 # ==============================================================================
 
-
-# %% [code] Cell 20
-
+# %% [code] Cell 23
 # ── Train RF ──────────────────────────────────────────────────────────────
 scaler_rf = StandardScaler()
 tr_feat_sc = scaler_rf.fit_transform(tr_feat)
@@ -925,15 +1382,13 @@ rf = RandomForestClassifier(
 rf.fit(tr_feat_sc, tr_y)
 
 rf_pred = rf.predict(te_feat_sc)
-rf_proba = rf.predict_proba(te_feat_sc)
-rf_val_proba = rf.predict_proba(va_feat_sc)
+rf_proba = align_class_proba(rf.predict_proba(te_feat_sc), rf.classes_)
+rf_val_proba = align_class_proba(rf.predict_proba(va_feat_sc), rf.classes_)
 
 res_rf = evaluate(te_y, rf_pred, model_name='Random Forest')
 results_log.append(res_rf)
 
-
-# %% [code] Cell 21
-
+# %% [code] Cell 24
 import numpy as np
 
 # ── SHAP Feature Importance ───────────────────────────────────────────────
@@ -980,13 +1435,12 @@ plt.savefig(RESULTS_DIR / 'shap_importance.png', dpi=120)
 plt.show()
 
 
+
 # ==============================================================================
-# Cell 22: 9. 1D CNN — Single-Epoch Deep Model
+# Section: 9. 1D CNN — Single-Epoch Deep Model
 # ==============================================================================
 
-
-# %% [code] Cell 23
-
+# %% [code] Cell 26
 # ── Dataset ───────────────────────────────────────────────────────────────
 class EpochDataset(Dataset):
     """Single-epoch dataset: (EEG, EOG) concatenated as 2-channel input."""
@@ -1131,13 +1585,12 @@ res_cnn = evaluate(te_y, cnn_pred, model_name='1D CNN')
 results_log.append(res_cnn)
 
 
+
 # ==============================================================================
-# Cell 24: 10. CNN-LSTM — Lightweight Sequence Model (TinySleepNet-style)
+# Section: 10. CNN-LSTM — Lightweight Sequence Model (TinySleepNet-style)
 # ==============================================================================
 
-
-# %% [code] Cell 25
-
+# %% [code] Cell 28
 class SeqEpochDataset(Dataset):
     """
     Boundary-safe sequence dataset.
@@ -1250,18 +1703,20 @@ res_lstm = evaluate(te_y, lstm_pred, model_name='CNN-LSTM')
 results_log.append(res_lstm)
 
 
+
 # ==============================================================================
-# Cell 26: 11. Compact Transformer with Attention + Entropy Uncertainty
+# Section: 11. Compact Transformer Sequence Model + Entropy Uncertainty
 # ==============================================================================
 
-
-# %% [code] Cell 27
-
+# %% [code] Cell 30
 class SleepTransformerLite(nn.Module):
     """
     Lightweight Transformer for sleep staging.
     CNN epoch encoder → Transformer encoder → center epoch classification.
-    Attention weights are stored for interpretability.
+
+    Note: PyTorch's standard TransformerEncoderLayer does not expose attention
+    weights here. Do not present this model as attention-interpretable unless a
+    custom attention layer is added later.
     """
     def __init__(self, seq_len=SEQ_LEN, n_classes=N_CLASSES,
                  d_model=256, nhead=4, num_layers=2, dropout=0.2):
@@ -1302,8 +1757,6 @@ class SleepTransformerLite(nn.Module):
             nn.Linear(d_model, n_classes)
         )
 
-        self._attn_weights = None  # for visualization
-
     def forward(self, x):
         B, S, C, T = x.shape
         emb = self.cnn(x.view(B * S, C, T)).view(B, S, -1)
@@ -1331,13 +1784,12 @@ res_tf = evaluate(te_y, tf_pred, model_name='Transformer')
 results_log.append(res_tf)
 
 
+
 # ==============================================================================
-# Cell 28: 12. Entropy-Based Uncertainty & Low-Confidence Deferral
+# Section: 12. Entropy-Based Uncertainty & Low-Confidence Deferral
 # ==============================================================================
 
-
-# %% [code] Cell 29
-
+# %% [code] Cell 32
 def entropy_from_proba(proba):
     """Shannon entropy of softmax distribution, normalized to [0, 1]."""
     proba = np.clip(np.asarray(proba), 1e-9, 1.0)
@@ -1507,13 +1959,41 @@ plt.savefig(RESULTS_DIR / 'uncertainty_rejection_curve_diagnostic.png', dpi=120)
 plt.show()
 
 
+# Probability-quality diagnostics for probability-dependent analyses.
+# These do not change the selected model; they warn whether entropy/HMM emissions
+# should be interpreted cautiously.
+calibration_rows = []
+calibration_bin_tables = {}
+for model_name, proba in [
+    ('Random Forest', rf_proba),
+    ('CNN-LSTM', lstm_proba),
+    ('Transformer', tf_proba),
+]:
+    ece, bins_df = expected_calibration_error(te_y, proba, n_bins=15)
+    calibration_bin_tables[model_name] = bins_df
+    calibration_rows.append({
+        'model': model_name,
+        'brier_score_multiclass': multiclass_brier_score(te_y, proba),
+        'ece_15_bins': ece,
+        'mean_confidence': float(np.asarray(proba).max(axis=1).mean()),
+    })
+
+calibration_df = pd.DataFrame(calibration_rows).sort_values('brier_score_multiclass')
+print('\nProbability diagnostics on test fold:')
+display(calibration_df.style.format({
+    'brier_score_multiclass': '{:.4f}',
+    'ece_15_bins': '{:.4f}',
+    'mean_confidence': '{:.4f}',
+}))
+calibration_df.to_csv(RESULTS_DIR / 'probability_diagnostics_fold0.csv', index=False)
+
+
+
 # ==============================================================================
-# Cell 30: 13. HMM Post-Processing (Viterbi Smoothing)
+# Section: 13. HMM Post-Processing (Viterbi Smoothing)
 # ==============================================================================
 
-
-# %% [code] Cell 31
-
+# %% [code] Cell 34
 def _label_sequences_from_records(records):
     return [np.asarray(r['labels'], dtype=np.int64) for r in records]
 
@@ -1646,13 +2126,43 @@ print(f'  CNN-LSTM   : {count_illegal_by_records(lstm_pred, te_records):4d} → 
 print(f'  Transformer: {count_illegal_by_records(tf_pred, te_records):4d} → {count_illegal_by_records(tf_smooth, te_records):4d}')
 
 
+# Explicitly quantify the trade-off instead of assuming HMM is always beneficial.
+hmm_tradeoff_rows = []
+for base_name, base_pred, smooth_name, smooth_pred in [
+    ('CNN-LSTM', lstm_pred, 'CNN-LSTM + HMM', lstm_smooth),
+    ('Transformer', tf_pred, 'Transformer + HMM', tf_smooth),
+]:
+    base_mf1 = f1_score(te_y, base_pred, labels=list(range(N_CLASSES)), average='macro', zero_division=0)
+    smooth_mf1 = f1_score(te_y, smooth_pred, labels=list(range(N_CLASSES)), average='macro', zero_division=0)
+    base_illegal = count_illegal_by_records(base_pred, te_records)
+    smooth_illegal = count_illegal_by_records(smooth_pred, te_records)
+    hmm_tradeoff_rows.append({
+        'base_model': base_name,
+        'smoothed_model': smooth_name,
+        'macro_f1_before': base_mf1,
+        'macro_f1_after': smooth_mf1,
+        'macro_f1_delta_after_minus_before': smooth_mf1 - base_mf1,
+        'illegal_transitions_before': base_illegal,
+        'illegal_transitions_after': smooth_illegal,
+        'illegal_transition_delta_after_minus_before': smooth_illegal - base_illegal,
+    })
+
+hmm_tradeoff_df = pd.DataFrame(hmm_tradeoff_rows)
+print('\nHMM smoothing trade-off summary:')
+display(hmm_tradeoff_df.style.format({
+    'macro_f1_before': '{:.4f}',
+    'macro_f1_after': '{:.4f}',
+    'macro_f1_delta_after_minus_before': '{:+.4f}',
+}))
+hmm_tradeoff_df.to_csv(RESULTS_DIR / 'hmm_smoothing_tradeoff_fold0.csv', index=False)
+
+
+
 # ==============================================================================
-# Cell 32: 14. Transition-Aware Error Analysis
+# Section: 14. Transition-Aware Error Analysis
 # ==============================================================================
 
-
-# %% [code] Cell 33
-
+# %% [code] Cell 36
 def transition_mask_for_sequence(y_seq, window=3):
     """Boolean mask for epochs within ±window of a true stage boundary in one record."""
     y_seq = np.asarray(y_seq)
@@ -1720,9 +2230,7 @@ for name, pred in [
 ]:
     transition_analysis(te_y, pred, model_name=name, records=te_records)
 
-
-# %% [code] Cell 34
-
+# %% [code] Cell 37
 # ── Hypnogram visualization ────────────────────────────────────────────────
 def plot_hypnogram_record(y_true, y_pred_dict, records, record_index=None, title='Hypnogram comparison'):
     """
@@ -1778,21 +2286,44 @@ plot_hypnogram_record(
 )
 
 
+
 # ==============================================================================
-# Cell 35: 15. Final Results Summary
+# Section: 15. Fold-0 Results Summary
 # ==============================================================================
 
-
-# %% [code] Cell 36
-
+# %% [code] Cell 39
 results_df = pd.DataFrame(results_log)
 results_df = results_df.sort_values('macro_f1', ascending=False).reset_index(drop=True)
 
-print('\n══════════════ RESULTS SUMMARY ══════════════')
+print('\n══════════════ FOLD-0 EPOCH-POOLED RESULTS ══════════════')
+print('Interpretation note: this table is a fold-0 demonstration result. Use the full CV cell for final paper-level claims.')
 display(results_df.style.format({'macro_f1': '{:.4f}', 'kappa': '{:.4f}', 'accuracy': '{:.4f}'})
         .highlight_max(subset=['macro_f1','kappa'], color='#c6efce'))
 
-# Bar chart
+# Record/night-level metrics: avoids relying only on epoch-pooled metrics.
+record_metric_dfs = []
+for model_name, pred in [
+    ('Random Forest', rf_pred),
+    ('1D CNN', cnn_pred),
+    ('CNN-LSTM', lstm_pred),
+    ('CNN-LSTM + HMM', lstm_smooth),
+    ('Transformer', tf_pred),
+    ('Transformer + HMM', tf_smooth),
+]:
+    record_metric_dfs.append(per_record_metrics(te_y, pred, te_records, model_name))
+
+record_metrics_fold0 = pd.concat(record_metric_dfs, ignore_index=True)
+record_summary_fold0 = summarize_record_metrics(record_metrics_fold0)
+
+print('\n══════════════ FOLD-0 RECORD/NIGHT-LEVEL SUMMARY ══════════════')
+display(record_summary_fold0.style.format({
+    'record_macro_f1_mean': '{:.4f}',
+    'record_macro_f1_sd': '{:.4f}',
+    'record_kappa_mean': '{:.4f}',
+    'record_kappa_sd': '{:.4f}',
+}))
+
+# Bar chart: fold-0 epoch-pooled metric comparison.
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
 models = results_df['model'].values
@@ -1800,57 +2331,90 @@ x = np.arange(len(models))
 
 ax1.bar(x, results_df['macro_f1'], color='steelblue', alpha=0.85)
 ax1.set_xticks(x); ax1.set_xticklabels(models, rotation=30, ha='right')
-ax1.set_ylabel('Macro-F1'); ax1.set_title('Macro-F1 Comparison')
+ax1.set_ylabel('Macro-F1'); ax1.set_title('Fold-0 Epoch-Pooled Macro-F1')
 ax1.set_ylim(max(0, results_df['macro_f1'].min() - 0.05), 1.0)
 
 ax2.bar(x, results_df['kappa'], color='darkorange', alpha=0.85)
 ax2.set_xticks(x); ax2.set_xticklabels(models, rotation=30, ha='right')
-ax2.set_ylabel("Cohen's κ"); ax2.set_title("Cohen's Kappa Comparison")
+ax2.set_ylabel("Cohen's κ"); ax2.set_title("Fold-0 Epoch-Pooled Cohen's κ")
 ax2.set_ylim(max(0, results_df['kappa'].min() - 0.05), 1.0)
 
 plt.tight_layout()
-plt.savefig(RESULTS_DIR / 'model_comparison.png', dpi=120)
+plt.savefig(RESULTS_DIR / 'model_comparison_fold0_epoch_pooled.png', dpi=120)
 plt.show()
 
-results_df.to_csv(RESULTS_DIR / 'results_fold0.csv', index=False)
-print(f'\nResults saved to {RESULTS_DIR}/results_fold0.csv')
+results_df.to_csv(RESULTS_DIR / 'results_fold0_epoch_pooled.csv', index=False)
+record_metrics_fold0.to_csv(RESULTS_DIR / 'record_metrics_fold0.csv', index=False)
+record_summary_fold0.to_csv(RESULTS_DIR / 'record_summary_fold0.csv', index=False)
+print(f'\nFold-0 result tables saved to {RESULTS_DIR}')
+
 
 
 # ==============================================================================
-# Cell 37: 16. Full Cross-Validation Loop
+# Section: 16. Full Cross-Validation Loop with BSPC Evidence Exports
 # ==============================================================================
 
+# %% [code] Cell 41
+# ── Full CV with journal-strengthening exports ─────────────────────────────
+# This cell is the primary BSPC evidence-generation loop.
+#
+# It exports:
+#   1) cv_results_record_aware.csv
+#   2) cv_per_stage_metrics.csv
+#   3) cv_split_stage_distribution.csv
+#   4) cv_computational_cost.csv
+#   5) cv_hmm_tradeoff.csv
+#   6) summaries for manuscript tables/figures
+#
+# HMM is deliberately reported as a trade-off: it may reduce large-jump
+# transition heuristics without improving Macro-F1 for stronger sequence models.
 
-# %% [code] Cell 38
-
-# ── Full CV (optional; can be slow) ────────────────────────────────────────
-# The previous version labelled this section "full CV" but evaluated RF only.
-# This version is explicit:
-#   - RUN_FULL_CV=False by default so the notebook remains practical to open/run.
-#   - If RUN_FULL_CV=True and CV_RUN_DEEP_MODELS=True, RF, CNN, CNN-LSTM,
-#     Transformer, and HMM-smoothed sequence models are all evaluated fold-wise.
-#   - If CV_RUN_DEEP_MODELS=False, only RF/RF+HMM are evaluated as a fast check.
-
-RUN_FULL_CV = True
-CV_RUN_DEEP_MODELS = True
+RUN_FULL_CV = bool(PAPER_RUN)
+CV_RUN_DEEP_MODELS = bool(PAPER_RUN_DEEP_CV)
 CV_DEEP_EPOCHS = 15
 CV_DEEP_PATIENCE = 5
 
+def save_cv_artifacts(prefix='partial'):
+    """Persist partial evidence after each fold to protect long Colab runs."""
+    if cv_results:
+        pd.DataFrame(cv_results).to_csv(RESULTS_DIR / f'cv_results_record_aware_{prefix}.csv', index=False)
+    if cv_per_class_rows:
+        pd.DataFrame(cv_per_class_rows).to_csv(RESULTS_DIR / f'cv_per_stage_metrics_{prefix}.csv', index=False)
+    if cv_split_distribution_rows:
+        pd.DataFrame(cv_split_distribution_rows).to_csv(RESULTS_DIR / f'cv_split_stage_distribution_{prefix}.csv', index=False)
+    if cv_cost_rows:
+        pd.DataFrame(cv_cost_rows).to_csv(RESULTS_DIR / f'cv_computational_cost_{prefix}.csv', index=False)
+    if cv_hmm_tradeoff_rows:
+        pd.DataFrame(cv_hmm_tradeoff_rows).to_csv(RESULTS_DIR / f'cv_hmm_tradeoff_{prefix}.csv', index=False)
+
 if RUN_FULL_CV:
     cv_results = []
+    cv_per_class_rows = []
+    cv_split_distribution_rows = []
+    cv_cost_rows = []
+    cv_hmm_tradeoff_rows = []
+    completed_folds = []
 
     for fold in range(N_FOLDS):
         print(f'\n══ Fold {fold+1}/{N_FOLDS} ══')
+        set_global_seed(SEED + fold)
 
         tr_rec_f, va_rec_f, te_rec_f = load_fold_records(fold, manifest)
         (tr_eeg_f, tr_eog_f, tr_y_f) = concat_records(tr_rec_f)
         (va_eeg_f, va_eog_f, va_y_f) = concat_records(va_rec_f)
         (te_eeg_f, te_eog_f, te_y_f) = concat_records(te_rec_f)
 
+        append_split_distribution_rows(cv_split_distribution_rows, fold, 'train', tr_y_f, tr_rec_f)
+        append_split_distribution_rows(cv_split_distribution_rows, fold, 'validation', va_y_f, va_rec_f)
+        append_split_distribution_rows(cv_split_distribution_rows, fold, 'test', te_y_f, te_rec_f)
+
+        # HMM transition matrix is estimated from training records only.
+        A_f, pi_f = fit_hmm_from_records(tr_rec_f)
+
         # ── RF baseline ──────────────────────────────────────────────────
+        start = time.perf_counter()
         tr_f = extract_features_batch(tr_eeg_f, tr_eog_f)
         te_f = extract_features_batch(te_eeg_f, te_eog_f)
-
         scaler_f = StandardScaler().fit(tr_f)
         rf_f = RandomForestClassifier(
             n_estimators=300,
@@ -1861,29 +2425,60 @@ if RUN_FULL_CV:
             random_state=SEED + fold
         )
         rf_f.fit(scaler_f.transform(tr_f), tr_y_f)
-        rf_proba_f = rf_f.predict_proba(scaler_f.transform(te_f))
+        rf_train_seconds = time.perf_counter() - start
+
+        start = time.perf_counter()
+        rf_proba_f = align_class_proba(rf_f.predict_proba(scaler_f.transform(te_f)), rf_f.classes_)
+        rf_infer_seconds = time.perf_counter() - start
         rf_pred_f = rf_proba_f.argmax(1)
 
         append_metric_row(cv_results, fold, 'Random Forest', te_y_f, rf_pred_f)
+        append_per_class_rows(cv_per_class_rows, fold, 'Random Forest', te_y_f, rf_pred_f)
+        append_cost_row(
+            cv_cost_rows, fold, 'Random Forest',
+            train_seconds=rf_train_seconds,
+            inference_seconds=rf_infer_seconds,
+            n_train_epochs=len(tr_y_f),
+            n_test_epochs=len(te_y_f),
+            n_parameters=np.nan,
+            model_size_mb_value=sklearn_object_size_mb({'model': rf_f, 'scaler': scaler_f}),
+            notes='Training time includes feature extraction, scaling, and RF fit.'
+        )
 
-        A_f, pi_f = fit_hmm_from_records(tr_rec_f)
+        start = time.perf_counter()
         rf_smooth_f = viterbi_smooth_by_record(rf_proba_f, te_rec_f, A_f, pi_f)
+        rf_hmm_seconds = time.perf_counter() - start
         append_metric_row(cv_results, fold, 'Random Forest + HMM', te_y_f, rf_smooth_f)
+        append_per_class_rows(cv_per_class_rows, fold, 'Random Forest + HMM', te_y_f, rf_smooth_f)
+        append_hmm_tradeoff_row(cv_hmm_tradeoff_rows, fold, 'Random Forest', te_y_f, rf_pred_f, rf_smooth_f, te_rec_f)
+        append_cost_row(
+            cv_cost_rows, fold, 'Random Forest + HMM',
+            train_seconds=0.0,
+            inference_seconds=rf_hmm_seconds,
+            n_train_epochs=len(tr_y_f),
+            n_test_epochs=len(te_y_f),
+            notes='Post-processing only; HMM transition matrix estimated from training labels.'
+        )
 
         if CV_RUN_DEEP_MODELS:
             cw_f = torch.FloatTensor(make_class_weight_vector(tr_y_f)).to(DEVICE)
 
-            # Shared loaders
+            # Shared single-epoch loaders
             tr_ds_f = EpochDataset(tr_eeg_f, tr_eog_f, tr_y_f)
             va_ds_f = EpochDataset(va_eeg_f, va_eog_f, va_y_f)
             te_ds_f = EpochDataset(te_eeg_f, te_eog_f, te_y_f)
 
-            tr_ld_f = DataLoader(tr_ds_f, batch_size=256, shuffle=True, num_workers=0)
+            tr_ld_f = DataLoader(
+                tr_ds_f, batch_size=256, shuffle=True, num_workers=0,
+                generator=torch_generator_for(SEED + 1000 + fold)
+            )
             va_ld_f = DataLoader(va_ds_f, batch_size=256, shuffle=False, num_workers=0)
             te_ld_f = DataLoader(te_ds_f, batch_size=256, shuffle=False, num_workers=0)
 
             # 1D CNN
+            set_global_seed(SEED + 10_000 + fold)
             cnn_f = CNN1D().to(DEVICE)
+            start = time.perf_counter()
             cnn_f, _ = train_model(
                 cnn_f, tr_ld_f, va_ld_f,
                 epochs=CV_DEEP_EPOCHS,
@@ -1891,8 +2486,22 @@ if RUN_FULL_CV:
                 class_weights_tensor=cw_f,
                 patience=CV_DEEP_PATIENCE
             )
-            cnn_proba_f, _ = predict_proba(cnn_f, te_ld_f)
-            append_metric_row(cv_results, fold, '1D CNN', te_y_f, cnn_proba_f.argmax(1))
+            cnn_train_seconds = time.perf_counter() - start
+            cnn_proba_f, _, cnn_infer_seconds = timed_predict_proba_torch(cnn_f, te_ld_f)
+            cnn_pred_f = cnn_proba_f.argmax(1)
+
+            append_metric_row(cv_results, fold, '1D CNN', te_y_f, cnn_pred_f)
+            append_per_class_rows(cv_per_class_rows, fold, '1D CNN', te_y_f, cnn_pred_f)
+            append_cost_row(
+                cv_cost_rows, fold, '1D CNN',
+                train_seconds=cnn_train_seconds,
+                inference_seconds=cnn_infer_seconds,
+                n_train_epochs=len(tr_y_f),
+                n_test_epochs=len(te_y_f),
+                n_parameters=model_num_parameters(cnn_f),
+                model_size_mb_value=model_size_mb(cnn_f),
+                notes=f'{CV_DEEP_EPOCHS} epoch maximum with early stopping.'
+            )
 
             del cnn_f
             gc.collect()
@@ -1904,12 +2513,17 @@ if RUN_FULL_CV:
             va_seq_ds_f = SeqEpochDataset(va_rec_f)
             te_seq_ds_f = SeqEpochDataset(te_rec_f)
 
-            tr_seq_ld_f = DataLoader(tr_seq_ds_f, batch_size=64, shuffle=True, num_workers=0)
+            tr_seq_ld_f = DataLoader(
+                tr_seq_ds_f, batch_size=64, shuffle=True, num_workers=0,
+                generator=torch_generator_for(SEED + 20_000 + fold)
+            )
             va_seq_ld_f = DataLoader(va_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
             te_seq_ld_f = DataLoader(te_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
 
             # CNN-LSTM
+            set_global_seed(SEED + 30_000 + fold)
             lstm_f = CNNLSTM().to(DEVICE)
+            start = time.perf_counter()
             lstm_f, _ = train_model(
                 lstm_f, tr_seq_ld_f, va_seq_ld_f,
                 epochs=CV_DEEP_EPOCHS,
@@ -1917,12 +2531,37 @@ if RUN_FULL_CV:
                 class_weights_tensor=cw_f,
                 patience=CV_DEEP_PATIENCE
             )
-            lstm_proba_f, _ = predict_proba(lstm_f, te_seq_ld_f)
+            lstm_train_seconds = time.perf_counter() - start
+            lstm_proba_f, _, lstm_infer_seconds = timed_predict_proba_torch(lstm_f, te_seq_ld_f)
             lstm_pred_f = lstm_proba_f.argmax(1)
-            append_metric_row(cv_results, fold, 'CNN-LSTM', te_y_f, lstm_pred_f)
 
+            append_metric_row(cv_results, fold, 'CNN-LSTM', te_y_f, lstm_pred_f)
+            append_per_class_rows(cv_per_class_rows, fold, 'CNN-LSTM', te_y_f, lstm_pred_f)
+            append_cost_row(
+                cv_cost_rows, fold, 'CNN-LSTM',
+                train_seconds=lstm_train_seconds,
+                inference_seconds=lstm_infer_seconds,
+                n_train_epochs=len(tr_y_f),
+                n_test_epochs=len(te_y_f),
+                n_parameters=model_num_parameters(lstm_f),
+                model_size_mb_value=model_size_mb(lstm_f),
+                notes=f'Record-aware {SEQ_LEN}-epoch context; {CV_DEEP_EPOCHS} epoch maximum.'
+            )
+
+            start = time.perf_counter()
             lstm_smooth_f = viterbi_smooth_by_record(lstm_proba_f, te_rec_f, A_f, pi_f)
+            lstm_hmm_seconds = time.perf_counter() - start
             append_metric_row(cv_results, fold, 'CNN-LSTM + HMM', te_y_f, lstm_smooth_f)
+            append_per_class_rows(cv_per_class_rows, fold, 'CNN-LSTM + HMM', te_y_f, lstm_smooth_f)
+            append_hmm_tradeoff_row(cv_hmm_tradeoff_rows, fold, 'CNN-LSTM', te_y_f, lstm_pred_f, lstm_smooth_f, te_rec_f)
+            append_cost_row(
+                cv_cost_rows, fold, 'CNN-LSTM + HMM',
+                train_seconds=0.0,
+                inference_seconds=lstm_hmm_seconds,
+                n_train_epochs=len(tr_y_f),
+                n_test_epochs=len(te_y_f),
+                notes='Post-processing only; interpret as transition-plausibility trade-off.'
+            )
 
             del lstm_f
             gc.collect()
@@ -1930,7 +2569,9 @@ if RUN_FULL_CV:
                 torch.cuda.empty_cache()
 
             # Transformer
+            set_global_seed(SEED + 40_000 + fold)
             tf_f = SleepTransformerLite().to(DEVICE)
+            start = time.perf_counter()
             tf_f, _ = train_model(
                 tf_f, tr_seq_ld_f, va_seq_ld_f,
                 epochs=CV_DEEP_EPOCHS,
@@ -1938,46 +2579,304 @@ if RUN_FULL_CV:
                 class_weights_tensor=cw_f,
                 patience=CV_DEEP_PATIENCE
             )
-            tf_proba_f, _ = predict_proba(tf_f, te_seq_ld_f)
+            tf_train_seconds = time.perf_counter() - start
+            tf_proba_f, _, tf_infer_seconds = timed_predict_proba_torch(tf_f, te_seq_ld_f)
             tf_pred_f = tf_proba_f.argmax(1)
-            append_metric_row(cv_results, fold, 'Transformer', te_y_f, tf_pred_f)
 
+            append_metric_row(cv_results, fold, 'Transformer', te_y_f, tf_pred_f)
+            append_per_class_rows(cv_per_class_rows, fold, 'Transformer', te_y_f, tf_pred_f)
+            append_cost_row(
+                cv_cost_rows, fold, 'Transformer',
+                train_seconds=tf_train_seconds,
+                inference_seconds=tf_infer_seconds,
+                n_train_epochs=len(tr_y_f),
+                n_test_epochs=len(te_y_f),
+                n_parameters=model_num_parameters(tf_f),
+                model_size_mb_value=model_size_mb(tf_f),
+                notes='Compact Transformer encoder; attention weights are not extracted.'
+            )
+
+            start = time.perf_counter()
             tf_smooth_f = viterbi_smooth_by_record(tf_proba_f, te_rec_f, A_f, pi_f)
+            tf_hmm_seconds = time.perf_counter() - start
             append_metric_row(cv_results, fold, 'Transformer + HMM', te_y_f, tf_smooth_f)
+            append_per_class_rows(cv_per_class_rows, fold, 'Transformer + HMM', te_y_f, tf_smooth_f)
+            append_hmm_tradeoff_row(cv_hmm_tradeoff_rows, fold, 'Transformer', te_y_f, tf_pred_f, tf_smooth_f, te_rec_f)
+            append_cost_row(
+                cv_cost_rows, fold, 'Transformer + HMM',
+                train_seconds=0.0,
+                inference_seconds=tf_hmm_seconds,
+                n_train_epochs=len(tr_y_f),
+                n_test_epochs=len(te_y_f),
+                notes='Post-processing only; interpret as transition-plausibility trade-off.'
+            )
 
             del tf_f
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        completed_folds.append(fold)
+        save_cv_artifacts(prefix='partial')
+
+        # Free fold-local large arrays before the next fold.
+        del tr_eeg_f, tr_eog_f, tr_y_f, va_eeg_f, va_eog_f, va_y_f, te_eeg_f, te_eog_f, te_y_f
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # ── Final summaries ──────────────────────────────────────────────────
     cv_df = pd.DataFrame(cv_results)
+    cv_per_class_df = pd.DataFrame(cv_per_class_rows)
+    cv_split_distribution_df = pd.DataFrame(cv_split_distribution_rows)
+    cv_cost_df = pd.DataFrame(cv_cost_rows)
+    cv_hmm_tradeoff_df = pd.DataFrame(cv_hmm_tradeoff_rows)
+
     cv_summary = cv_df.groupby('model').agg(
         macro_f1_mean=('macro_f1', 'mean'),
         macro_f1_std=('macro_f1', 'std'),
         kappa_mean=('kappa', 'mean'),
         kappa_std=('kappa', 'std'),
         accuracy_mean=('accuracy', 'mean'),
-        accuracy_std=('accuracy', 'std')
+        accuracy_std=('accuracy', 'std'),
+        n_folds=('fold', 'nunique')
     ).sort_values('macro_f1_mean', ascending=False).round(4)
+
+    per_class_summary = (cv_per_class_df
+        .groupby(['model', 'stage'])
+        .agg(
+            precision_mean=('precision', 'mean'),
+            precision_std=('precision', 'std'),
+            recall_mean=('recall', 'mean'),
+            recall_std=('recall', 'std'),
+            f1_mean=('f1', 'mean'),
+            f1_std=('f1', 'std'),
+            support_total=('support', 'sum'),
+            n_folds=('fold', 'nunique')
+        )
+        .reset_index()
+        .sort_values(['model', 'stage'])
+    )
+
+    cost_summary = (cv_cost_df
+        .groupby('model')
+        .agg(
+            train_seconds_mean=('train_seconds', 'mean'),
+            train_seconds_std=('train_seconds', 'std'),
+            inference_seconds_mean=('inference_seconds', 'mean'),
+            inference_seconds_std=('inference_seconds', 'std'),
+            n_parameters_mean=('n_parameters', 'mean'),
+            model_size_mb_mean=('model_size_mb', 'mean'),
+            n_folds=('fold', 'nunique')
+        )
+        .reset_index()
+    )
+
+    hmm_tradeoff_summary = (cv_hmm_tradeoff_df
+        .groupby(['base_model', 'smoothed_model'])
+        .agg(
+            macro_f1_delta_mean=('macro_f1_delta_after_minus_before', 'mean'),
+            macro_f1_delta_std=('macro_f1_delta_after_minus_before', 'std'),
+            kappa_delta_mean=('kappa_delta_after_minus_before', 'mean'),
+            large_jump_delta_mean=('large_jump_delta_after_minus_before', 'mean'),
+            large_jump_before_mean=('large_jump_transitions_before', 'mean'),
+            large_jump_after_mean=('large_jump_transitions_after', 'mean'),
+            n_folds=('fold', 'nunique')
+        )
+        .reset_index()
+    )
 
     print('\n── Cross-Validation Summary ──')
     display(cv_summary)
 
+    print('\n── Per-stage F1 summary ──')
+    display(per_class_summary.pivot(index='model', columns='stage', values='f1_mean').round(4))
+
+    print('\n── Computational-cost summary ──')
+    display(cost_summary.round(4))
+
+    print('\n── HMM trade-off summary ──')
+    display(hmm_tradeoff_summary.round(4))
+
     cv_df.to_csv(RESULTS_DIR / 'cv_results_record_aware.csv', index=False)
     cv_summary.to_csv(RESULTS_DIR / 'cv_summary_record_aware.csv')
+    cv_per_class_df.to_csv(RESULTS_DIR / 'cv_per_stage_metrics.csv', index=False)
+    per_class_summary.to_csv(RESULTS_DIR / 'cv_per_stage_summary.csv', index=False)
+    cv_split_distribution_df.to_csv(RESULTS_DIR / 'cv_split_stage_distribution.csv', index=False)
+    cv_cost_df.to_csv(RESULTS_DIR / 'cv_computational_cost.csv', index=False)
+    cost_summary.to_csv(RESULTS_DIR / 'cv_computational_cost_summary.csv', index=False)
+    cv_hmm_tradeoff_df.to_csv(RESULTS_DIR / 'cv_hmm_tradeoff.csv', index=False)
+    hmm_tradeoff_summary.to_csv(RESULTS_DIR / 'cv_hmm_tradeoff_summary.csv', index=False)
+
 else:
-    print('Full CV skipped (RUN_FULL_CV = False).')
-    print('For final paper-quality fold-wise estimates, set RUN_FULL_CV=True.')
-    print('Set CV_RUN_DEEP_MODELS=False for a fast RF-only CV sanity check.')
+    print('Full CV skipped because PAPER_RUN = False.')
+    print('For final BSPC paper-quality fold-wise estimates, set:')
+    print('  PAPER_RUN = True')
+    print('  PAPER_RUN_DEEP_CV = True')
+    print('  FORCE_REBUILD_CACHE = True for one final preprocessing rebuild.')
+
+# %% [code] Cell 42
+# ── Repeated-seed confirmation for top sequence models ─────────────────────
+# This is a journal-strengthening sensitivity analysis for BSPC.
+# It evaluates whether the near-tie between CNN-LSTM and Transformer is stable
+# across random initialization and DataLoader shuffling.
+#
+# Outputs:
+#   repeated_seed_sequence_results.csv
+#   repeated_seed_sequence_per_stage_metrics.csv
+#   repeated_seed_sequence_cost.csv
+#   repeated_seed_sequence_summary.csv
+
+if RUN_REPEATED_SEED_CONFIRMATION:
+    if REPEATED_SEED_FOLDS == 'all':
+        seed_folds = list(range(N_FOLDS))
+    else:
+        seed_folds = list(REPEATED_SEED_FOLDS)
+
+    repeated_rows = []
+    repeated_per_class_rows = []
+    repeated_cost_rows = []
+
+    for seed in REPEATED_SEEDS:
+        print(f'\n════ Repeated-seed run: seed={seed} ════')
+        for fold in seed_folds:
+            print(f'\n── Seed {seed} | Fold {fold+1}/{N_FOLDS} ──')
+            set_global_seed(seed + fold)
+
+            tr_rec_f, va_rec_f, te_rec_f = load_fold_records(fold, manifest)
+            tr_eeg_f, tr_eog_f, tr_y_f = concat_records(tr_rec_f)
+            va_eeg_f, va_eog_f, va_y_f = concat_records(va_rec_f)
+            te_eeg_f, te_eog_f, te_y_f = concat_records(te_rec_f)
+
+            cw_f = torch.FloatTensor(make_class_weight_vector(tr_y_f)).to(DEVICE)
+
+            tr_seq_ds_f = SeqEpochDataset(tr_rec_f)
+            va_seq_ds_f = SeqEpochDataset(va_rec_f)
+            te_seq_ds_f = SeqEpochDataset(te_rec_f)
+
+            tr_seq_ld_f = DataLoader(
+                tr_seq_ds_f, batch_size=64, shuffle=True, num_workers=0,
+                generator=torch_generator_for(seed + 50_000 + fold)
+            )
+            va_seq_ld_f = DataLoader(va_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
+            te_seq_ld_f = DataLoader(te_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
+
+            if 'CNN-LSTM' in REPEATED_SEED_MODELS:
+                set_global_seed(seed + 60_000 + fold)
+                lstm_rs = CNNLSTM().to(DEVICE)
+                start = time.perf_counter()
+                lstm_rs, _ = train_model(
+                    lstm_rs, tr_seq_ld_f, va_seq_ld_f,
+                    epochs=REPEATED_SEED_EPOCHS,
+                    lr=5e-4,
+                    class_weights_tensor=cw_f,
+                    patience=REPEATED_SEED_PATIENCE
+                )
+                train_seconds = time.perf_counter() - start
+                proba, _, infer_seconds = timed_predict_proba_torch(lstm_rs, te_seq_ld_f)
+                pred = proba.argmax(1)
+
+                append_metric_row(repeated_rows, fold, 'CNN-LSTM', te_y_f, pred)
+                repeated_rows[-1]['seed'] = int(seed)
+                append_per_class_rows(repeated_per_class_rows, fold, 'CNN-LSTM', te_y_f, pred, seed=seed)
+                append_cost_row(
+                    repeated_cost_rows, fold, 'CNN-LSTM',
+                    train_seconds=train_seconds,
+                    inference_seconds=infer_seconds,
+                    n_train_epochs=len(tr_y_f),
+                    n_test_epochs=len(te_y_f),
+                    n_parameters=model_num_parameters(lstm_rs),
+                    model_size_mb_value=model_size_mb(lstm_rs),
+                    seed=seed,
+                    notes='Repeated-seed confirmation run.'
+                )
+                del lstm_rs
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            if 'Transformer' in REPEATED_SEED_MODELS:
+                set_global_seed(seed + 70_000 + fold)
+                tf_rs = SleepTransformerLite().to(DEVICE)
+                start = time.perf_counter()
+                tf_rs, _ = train_model(
+                    tf_rs, tr_seq_ld_f, va_seq_ld_f,
+                    epochs=REPEATED_SEED_EPOCHS,
+                    lr=3e-4,
+                    class_weights_tensor=cw_f,
+                    patience=REPEATED_SEED_PATIENCE
+                )
+                train_seconds = time.perf_counter() - start
+                proba, _, infer_seconds = timed_predict_proba_torch(tf_rs, te_seq_ld_f)
+                pred = proba.argmax(1)
+
+                append_metric_row(repeated_rows, fold, 'Transformer', te_y_f, pred)
+                repeated_rows[-1]['seed'] = int(seed)
+                append_per_class_rows(repeated_per_class_rows, fold, 'Transformer', te_y_f, pred, seed=seed)
+                append_cost_row(
+                    repeated_cost_rows, fold, 'Transformer',
+                    train_seconds=train_seconds,
+                    inference_seconds=infer_seconds,
+                    n_train_epochs=len(tr_y_f),
+                    n_test_epochs=len(te_y_f),
+                    n_parameters=model_num_parameters(tf_rs),
+                    model_size_mb_value=model_size_mb(tf_rs),
+                    seed=seed,
+                    notes='Repeated-seed confirmation run.'
+                )
+                del tf_rs
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Save partial after each fold to make long runs recoverable.
+            pd.DataFrame(repeated_rows).to_csv(RESULTS_DIR / 'repeated_seed_sequence_results_partial.csv', index=False)
+            pd.DataFrame(repeated_per_class_rows).to_csv(RESULTS_DIR / 'repeated_seed_sequence_per_stage_metrics_partial.csv', index=False)
+            pd.DataFrame(repeated_cost_rows).to_csv(RESULTS_DIR / 'repeated_seed_sequence_cost_partial.csv', index=False)
+
+            del tr_eeg_f, tr_eog_f, tr_y_f, va_eeg_f, va_eog_f, va_y_f, te_eeg_f, te_eog_f, te_y_f
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    repeated_df = pd.DataFrame(repeated_rows)
+    repeated_per_class_df = pd.DataFrame(repeated_per_class_rows)
+    repeated_cost_df = pd.DataFrame(repeated_cost_rows)
+
+    repeated_summary = (repeated_df
+        .groupby('model')
+        .agg(
+            macro_f1_mean=('macro_f1', 'mean'),
+            macro_f1_std=('macro_f1', 'std'),
+            kappa_mean=('kappa', 'mean'),
+            kappa_std=('kappa', 'std'),
+            accuracy_mean=('accuracy', 'mean'),
+            accuracy_std=('accuracy', 'std'),
+            n_seeds=('seed', 'nunique'),
+            n_folds=('fold', 'nunique')
+        )
+        .sort_values('macro_f1_mean', ascending=False)
+        .reset_index()
+    )
+
+    print('\n── Repeated-seed summary ──')
+    display(repeated_summary.round(4))
+
+    repeated_df.to_csv(RESULTS_DIR / 'repeated_seed_sequence_results.csv', index=False)
+    repeated_per_class_df.to_csv(RESULTS_DIR / 'repeated_seed_sequence_per_stage_metrics.csv', index=False)
+    repeated_cost_df.to_csv(RESULTS_DIR / 'repeated_seed_sequence_cost.csv', index=False)
+    repeated_summary.to_csv(RESULTS_DIR / 'repeated_seed_sequence_summary.csv', index=False)
+
+else:
+    print('Repeated-seed confirmation skipped because RUN_REPEATED_SEED_CONFIRMATION=False.')
+
 
 
 # ==============================================================================
-# Cell 39: 17. Per-Class Error Analysis & N1 Deep-Dive
+# Section: 17. Per-Class Error Analysis & N1 Deep-Dive
 # ==============================================================================
 
-
-# %% [code] Cell 40
-
+# %% [code] Cell 44
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 model_pairs = [
     ('CNN-LSTM', lstm_pred, 'darkorange'),
@@ -2043,58 +2942,232 @@ plt.savefig(RESULTS_DIR / 'per_class_analysis.png', dpi=120)
 plt.show()
 
 
+
 # ==============================================================================
-# Cell 41: 18. Channel Ablation Study (EEG-only vs EEG+EOG)
+# Section: 18. Cross-Fold Channel Ablation Study
 # ==============================================================================
 
+# %% [code] Cell 46
+# ── Cross-fold channel ablation study ───────────────────────────────────────
+# The earlier fold-0 RF-only ablation is replaced with a journal-strengthened
+# cross-fold ablation. This keeps the analysis out of "notebook demo" territory.
+#
+# Modes:
+#   EEG only  : EOG channel is zeroed.
+#   EOG only  : EEG channel is zeroed.
+#   EEG + EOG : both channels retained.
+#
+# Models:
+#   Random Forest, 1D CNN, CNN-LSTM by default.
+#
+# Outputs:
+#   channel_ablation_cv_results.csv
+#   channel_ablation_cv_per_stage_metrics.csv
+#   channel_ablation_cv_cost.csv
+#   channel_ablation_cv_summary.csv
 
-# %% [code] Cell 42
+if RUN_CHANNEL_ABLATION_CV:
+    channel_rows = []
+    channel_per_class_rows = []
+    channel_cost_rows = []
 
-# Quick RF ablation on fold 0
-def rf_ablation(eeg_tr, eog_tr, y_tr, eeg_te, eog_te, y_te, use_eog=True):
-    if use_eog:
-        feat_tr = extract_features_batch(eeg_tr, eog_tr)
-        feat_te = extract_features_batch(eeg_te, eog_te)
-        label   = 'EEG + EOG'
-    else:
-        zeros = np.zeros_like(eeg_tr)
-        feat_tr = extract_features_batch(eeg_tr, zeros)
-        feat_te = extract_features_batch(eeg_te, np.zeros_like(eeg_te))
-        label   = 'EEG only'
+    for fold in range(N_FOLDS):
+        print(f'\n════ Channel ablation fold {fold+1}/{N_FOLDS} ════')
+        tr_rec_base, va_rec_base, te_rec_base = load_fold_records(fold, manifest)
 
-    scaler = StandardScaler().fit(feat_tr)
-    clf = RandomForestClassifier(n_estimators=200, class_weight='balanced',
-                                  n_jobs=-1, random_state=SEED)
-    clf.fit(scaler.transform(feat_tr), y_tr)
-    pred = clf.predict(scaler.transform(feat_te))
-    mf1  = f1_score(y_te, pred, average='macro', zero_division=0)
-    kap  = cohen_kappa_score(y_te, pred)
-    return label, mf1, kap
+        for mode in CHANNEL_ABLATION_MODES:
+            print(f'\n── {mode} ──')
+            tr_rec_f = records_with_channel_mode(tr_rec_base, mode)
+            va_rec_f = records_with_channel_mode(va_rec_base, mode)
+            te_rec_f = records_with_channel_mode(te_rec_base, mode)
 
+            tr_eeg_f, tr_eog_f, tr_y_f = concat_records(tr_rec_f)
+            va_eeg_f, va_eog_f, va_y_f = concat_records(va_rec_f)
+            te_eeg_f, te_eog_f, te_y_f = concat_records(te_rec_f)
 
-abl_results = []
-for use_eog in [False, True]:
-    label, mf1, kap = rf_ablation(
-        tr_eeg, tr_eog, tr_y,
-        te_eeg, te_eog, te_y,
-        use_eog=use_eog
+            if 'Random Forest' in CHANNEL_ABLATION_MODELS:
+                start = time.perf_counter()
+                tr_f = extract_features_batch(tr_eeg_f, tr_eog_f)
+                te_f = extract_features_batch(te_eeg_f, te_eog_f)
+                scaler_ab = StandardScaler().fit(tr_f)
+                rf_ab = RandomForestClassifier(
+                    n_estimators=300,
+                    max_depth=None,
+                    min_samples_leaf=2,
+                    class_weight=make_class_weight_dict(tr_y_f),
+                    n_jobs=-1,
+                    random_state=SEED + fold
+                )
+                rf_ab.fit(scaler_ab.transform(tr_f), tr_y_f)
+                train_seconds = time.perf_counter() - start
+
+                start = time.perf_counter()
+                proba = align_class_proba(rf_ab.predict_proba(scaler_ab.transform(te_f)), rf_ab.classes_)
+                infer_seconds = time.perf_counter() - start
+                pred = proba.argmax(1)
+
+                append_metric_row(channel_rows, fold, 'Random Forest', te_y_f, pred)
+                channel_rows[-1]['channel_mode'] = mode
+                append_per_class_rows(channel_per_class_rows, fold, 'Random Forest', te_y_f, pred)
+                channel_per_class_rows[-N_CLASSES:] = [
+                    dict(row, channel_mode=mode) for row in channel_per_class_rows[-N_CLASSES:]
+                ]
+                append_cost_row(
+                    channel_cost_rows, fold, 'Random Forest',
+                    train_seconds=train_seconds,
+                    inference_seconds=infer_seconds,
+                    n_train_epochs=len(tr_y_f),
+                    n_test_epochs=len(te_y_f),
+                    model_size_mb_value=sklearn_object_size_mb({'model': rf_ab, 'scaler': scaler_ab}),
+                    notes=f'Channel ablation: {mode}'
+                )
+                channel_cost_rows[-1]['channel_mode'] = mode
+
+            if '1D CNN' in CHANNEL_ABLATION_MODELS or 'CNN-LSTM' in CHANNEL_ABLATION_MODELS:
+                cw_f = torch.FloatTensor(make_class_weight_vector(tr_y_f)).to(DEVICE)
+
+            if '1D CNN' in CHANNEL_ABLATION_MODELS:
+                set_global_seed(SEED + 80_000 + fold)
+                tr_ds_f = EpochDataset(tr_eeg_f, tr_eog_f, tr_y_f)
+                va_ds_f = EpochDataset(va_eeg_f, va_eog_f, va_y_f)
+                te_ds_f = EpochDataset(te_eeg_f, te_eog_f, te_y_f)
+                tr_ld_f = DataLoader(
+                    tr_ds_f, batch_size=256, shuffle=True, num_workers=0,
+                    generator=torch_generator_for(SEED + 81_000 + fold)
+                )
+                va_ld_f = DataLoader(va_ds_f, batch_size=256, shuffle=False, num_workers=0)
+                te_ld_f = DataLoader(te_ds_f, batch_size=256, shuffle=False, num_workers=0)
+
+                cnn_ab = CNN1D().to(DEVICE)
+                start = time.perf_counter()
+                cnn_ab, _ = train_model(
+                    cnn_ab, tr_ld_f, va_ld_f,
+                    epochs=CHANNEL_ABLATION_DEEP_EPOCHS,
+                    lr=1e-3,
+                    class_weights_tensor=cw_f,
+                    patience=CHANNEL_ABLATION_DEEP_PATIENCE
+                )
+                train_seconds = time.perf_counter() - start
+                proba, _, infer_seconds = timed_predict_proba_torch(cnn_ab, te_ld_f)
+                pred = proba.argmax(1)
+
+                append_metric_row(channel_rows, fold, '1D CNN', te_y_f, pred)
+                channel_rows[-1]['channel_mode'] = mode
+                append_per_class_rows(channel_per_class_rows, fold, '1D CNN', te_y_f, pred)
+                channel_per_class_rows[-N_CLASSES:] = [
+                    dict(row, channel_mode=mode) for row in channel_per_class_rows[-N_CLASSES:]
+                ]
+                append_cost_row(
+                    channel_cost_rows, fold, '1D CNN',
+                    train_seconds=train_seconds,
+                    inference_seconds=infer_seconds,
+                    n_train_epochs=len(tr_y_f),
+                    n_test_epochs=len(te_y_f),
+                    n_parameters=model_num_parameters(cnn_ab),
+                    model_size_mb_value=model_size_mb(cnn_ab),
+                    notes=f'Channel ablation: {mode}'
+                )
+                channel_cost_rows[-1]['channel_mode'] = mode
+
+                del cnn_ab
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            if 'CNN-LSTM' in CHANNEL_ABLATION_MODELS:
+                set_global_seed(SEED + 90_000 + fold)
+                tr_seq_ds_f = SeqEpochDataset(tr_rec_f)
+                va_seq_ds_f = SeqEpochDataset(va_rec_f)
+                te_seq_ds_f = SeqEpochDataset(te_rec_f)
+                tr_seq_ld_f = DataLoader(
+                    tr_seq_ds_f, batch_size=64, shuffle=True, num_workers=0,
+                    generator=torch_generator_for(SEED + 91_000 + fold)
+                )
+                va_seq_ld_f = DataLoader(va_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
+                te_seq_ld_f = DataLoader(te_seq_ds_f, batch_size=64, shuffle=False, num_workers=0)
+
+                lstm_ab = CNNLSTM().to(DEVICE)
+                start = time.perf_counter()
+                lstm_ab, _ = train_model(
+                    lstm_ab, tr_seq_ld_f, va_seq_ld_f,
+                    epochs=CHANNEL_ABLATION_DEEP_EPOCHS,
+                    lr=5e-4,
+                    class_weights_tensor=cw_f,
+                    patience=CHANNEL_ABLATION_DEEP_PATIENCE
+                )
+                train_seconds = time.perf_counter() - start
+                proba, _, infer_seconds = timed_predict_proba_torch(lstm_ab, te_seq_ld_f)
+                pred = proba.argmax(1)
+
+                append_metric_row(channel_rows, fold, 'CNN-LSTM', te_y_f, pred)
+                channel_rows[-1]['channel_mode'] = mode
+                append_per_class_rows(channel_per_class_rows, fold, 'CNN-LSTM', te_y_f, pred)
+                channel_per_class_rows[-N_CLASSES:] = [
+                    dict(row, channel_mode=mode) for row in channel_per_class_rows[-N_CLASSES:]
+                ]
+                append_cost_row(
+                    channel_cost_rows, fold, 'CNN-LSTM',
+                    train_seconds=train_seconds,
+                    inference_seconds=infer_seconds,
+                    n_train_epochs=len(tr_y_f),
+                    n_test_epochs=len(te_y_f),
+                    n_parameters=model_num_parameters(lstm_ab),
+                    model_size_mb_value=model_size_mb(lstm_ab),
+                    notes=f'Channel ablation: {mode}'
+                )
+                channel_cost_rows[-1]['channel_mode'] = mode
+
+                del lstm_ab
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            pd.DataFrame(channel_rows).to_csv(RESULTS_DIR / 'channel_ablation_cv_results_partial.csv', index=False)
+            pd.DataFrame(channel_per_class_rows).to_csv(RESULTS_DIR / 'channel_ablation_cv_per_stage_metrics_partial.csv', index=False)
+            pd.DataFrame(channel_cost_rows).to_csv(RESULTS_DIR / 'channel_ablation_cv_cost_partial.csv', index=False)
+
+            del tr_eeg_f, tr_eog_f, tr_y_f, va_eeg_f, va_eog_f, va_y_f, te_eeg_f, te_eog_f, te_y_f
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    channel_df = pd.DataFrame(channel_rows)
+    channel_per_class_df = pd.DataFrame(channel_per_class_rows)
+    channel_cost_df = pd.DataFrame(channel_cost_rows)
+
+    channel_summary = (channel_df
+        .groupby(['model', 'channel_mode'])
+        .agg(
+            macro_f1_mean=('macro_f1', 'mean'),
+            macro_f1_std=('macro_f1', 'std'),
+            kappa_mean=('kappa', 'mean'),
+            kappa_std=('kappa', 'std'),
+            accuracy_mean=('accuracy', 'mean'),
+            accuracy_std=('accuracy', 'std'),
+            n_folds=('fold', 'nunique')
+        )
+        .reset_index()
+        .sort_values(['model', 'macro_f1_mean'], ascending=[True, False])
     )
-    abl_results.append({'Channels': label, 'Macro-F1': round(mf1, 4), 'Kappa': round(kap, 4)})
-    print(f'{label}: MF1={mf1:.4f}  κ={kap:.4f}')
 
-abl_df = pd.DataFrame(abl_results)
-print('\nChannel ablation (Random Forest):')
-display(abl_df)
-abl_df.to_csv(RESULTS_DIR / 'channel_ablation.csv', index=False)
+    print('\n── Channel-ablation CV summary ──')
+    display(channel_summary.round(4))
+
+    channel_df.to_csv(RESULTS_DIR / 'channel_ablation_cv_results.csv', index=False)
+    channel_per_class_df.to_csv(RESULTS_DIR / 'channel_ablation_cv_per_stage_metrics.csv', index=False)
+    channel_cost_df.to_csv(RESULTS_DIR / 'channel_ablation_cv_cost.csv', index=False)
+    channel_summary.to_csv(RESULTS_DIR / 'channel_ablation_cv_summary.csv', index=False)
+
+else:
+    print('Channel ablation skipped because RUN_CHANNEL_ABLATION_CV=False.')
+
 
 
 # ==============================================================================
-# Cell 43: 19. Save All Models
+# Section: 19. Save All Models
 # ==============================================================================
 
-
-# %% [code] Cell 44
-
+# %% [code] Cell 48
 # ── Persist trained fold-0 models and metadata ─────────────────────────────
 torch.save(cnn_model.state_dict(), RESULTS_DIR / 'cnn1d.pt')
 torch.save(cnnlstm.state_dict(), RESULTS_DIR / 'cnn_lstm.pt')
@@ -2108,9 +3181,12 @@ with open(RESULTS_DIR / 'rf_model.pkl', 'wb') as f:
         'hmm_A': A_hmm,
         'hmm_pi': pi_hmm,
         'stage_names': STAGE_NAMES,
+        'preprocessing_hash': PREPROCESSING_HASH,
+        'preprocessing_config': PREPROCESSING_CONFIG,
         'notes': (
             'Fold-0 models. HMM transition matrix was fitted within training records; '
-            'Viterbi smoothing should be applied per record.'
+            'Viterbi smoothing should be applied per record. Attention weights are not '
+            'extracted from the Transformer in this version.'
         )
     }, f)
 
@@ -2126,13 +3202,45 @@ run_metadata = {
     'fs': int(FS),
     'seq_len': int(SEQ_LEN),
     'wake_trim_sec': int(WAKE_TRIM),
+    'preprocessing_hash': PREPROCESSING_HASH,
+    'preprocessing_config': PREPROCESSING_CONFIG,
+    'filter_continuous_before_epoching': FILTER_CONTINUOUS_BEFORE_EPOCHING,
+    'cache_dir': str(CACHE_DIR),
+    'paper_run': bool(PAPER_RUN),
+    'paper_run_deep_cv': bool(PAPER_RUN_DEEP_CV),
     'record_boundary_safe_sequences': True,
     'record_boundary_safe_hmm': True,
+    'record_boundary_safe_transition_analysis': True,
     'validation_selected_entropy_thresholds': True,
+    'record_level_metrics_saved': True,
+    'probability_diagnostics_saved': True,
+    'force_rebuild_cache': bool(FORCE_REBUILD_CACHE),
+    'run_repeated_seed_confirmation': bool(RUN_REPEATED_SEED_CONFIRMATION),
+    'repeated_seeds': REPEATED_SEEDS,
+    'repeated_seed_models': REPEATED_SEED_MODELS,
+    'repeated_seed_folds': REPEATED_SEED_FOLDS,
+    'run_channel_ablation_cv': bool(RUN_CHANNEL_ABLATION_CV),
+    'channel_ablation_modes': CHANNEL_ABLATION_MODES,
+    'channel_ablation_models': CHANNEL_ABLATION_MODELS,
+    'full_cv_per_stage_metrics_saved': True,
+    'cv_computational_cost_saved': True,
+    'split_stage_distributions_saved': True,
+    'hmm_reported_as_tradeoff': True,
+    'entropy_deferral_reported_as_selective_prediction': True,
 }
 with open(RESULTS_DIR / 'run_metadata.pkl', 'wb') as f:
     pickle.dump(run_metadata, f)
 
+with open(RESULTS_DIR / 'run_metadata.json', 'w') as f:
+    json.dump(run_metadata, f, indent=2, default=str)
+
 print('All fold-0 models and metadata saved to', RESULTS_DIR)
 print('\n══ Pipeline complete ══')
 print(f'Results directory: {RESULTS_DIR.resolve()}')
+
+
+
+# ==============================================================================
+# Section: Summary
+# ==============================================================================
+

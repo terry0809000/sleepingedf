@@ -1,48 +1,40 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.venv/
-venv/
-env/
-.ipynb_checkpoints/
-
-# OS / editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# Sleep-EDF raw data and archives
+# Raw Sleep-EDF data and archives
 *.edf
 *.EDF
 sleep-edf-database-expanded-*/
 sleep-edf-database-expanded-*.zip
-sleep-cassette/
-sleep-telemetry/
+data/
+raw_data/
 
-# Runtime caches and outputs
-cache/
-runtime/
+# Pipeline outputs
 SleepEDF_pipeline_outputs/
 sleep_edf_pipeline_runtime/
-outputs/
+cache/
 results/
 splits/
-figures/
-models/
+outputs/
+
+# Models and generated arrays
 *.pt
 *.pth
 *.pkl
-*.pickle
 *.joblib
-
-# Large generated arrays
 *.npy
 *.npz
 *.h5
 *.hdf5
 
-# Logs
-*.log
-wandb/
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

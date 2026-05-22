@@ -1,31 +1,57 @@
-# Sleep-EDF Sleep Staging Pipeline
+# Sleep-EDF BSPC Final Strengthened Pipeline
 
-Repository-ready version of the Sleep-EDF sleep-stage classification notebook.
+This ZIP is a GitHub-ready replacement package for:
 
-## Contents
+```text
+https://github.com/terry0809000/sleepingedf
+```
 
-- `notebooks/sleep_edf_pipeline_record_boundary_fixed.ipynb` — clean notebook version with outputs stripped for Git.
-- `scripts/sleep_edf_pipeline_record_boundary_fixed.py` — linear Python export of the notebook code.
-- `requirements.txt` — Python dependencies used by the notebook.
-- `.gitignore` — prevents raw EDF data, caches, trained models, and generated outputs from being committed.
-- `.github/workflows/syntax-check.yml` — lightweight syntax check for the exported Python script.
+It is designed to replace the previous notebook with a BSPC-strengthened version while preserving the repository structure.
 
-## Project summary
+## Main files
 
-This pipeline builds a lightweight, subject-wise Sleep-EDF sleep staging workflow. It includes:
+```text
+notebooks/sleep_edf_pipeline_record_boundary_fixed.ipynb
+notebooks/sleep_edf_pipeline_BSPC_FINAL_STRENGTHENED.ipynb
+scripts/sleep_edf_pipeline_record_boundary_fixed.py
+requirements.txt
+.gitignore
+docs/SECTION_INDEX.md
+docs/GITHUB_REPLACE_COMMANDS.md
+replace_original_notebook.sh
+```
 
-- Sleep-EDF local/Google Drive data loading.
-- Subject-wise fold assignment to reduce leakage.
-- Record-boundary-safe sequence construction.
-- Classical feature extraction and Random Forest baseline.
-- 1D CNN / CNN-LSTM neural models.
-- Hidden Markov Model smoothing.
-- Confusion matrices, macro-F1, Cohen's kappa, and interpretability-oriented outputs.
-- Channel ablation and model persistence.
+## What this version adds
 
-## Important data note
+- Final forced preprocessing-cache rebuild option: `FORCE_REBUILD_CACHE = True`.
+- Preprocessing code-version hash to reduce stale-cache reuse.
+- Full cross-validation per-stage precision, recall, F1, and support export.
+- Fold-wise train/validation/test class-distribution export.
+- Computational-cost tracking across folds.
+- Repeated-seed sensitivity for CNN-LSTM and Transformer.
+- Cross-fold channel ablation for EEG-only, EOG-only, and EEG+EOG.
+- HMM smoothing reported as a trade-off by metric/model.
+- Cautious entropy-deferral and calibration wording.
 
-Do **not** commit raw Sleep-EDF EDF files, zip archives, cache folders, or trained model artefacts to GitHub.
+## Expected output CSVs after running
+
+```text
+cv_results_record_aware.csv
+cv_per_stage_metrics.csv
+cv_split_stage_distribution.csv
+cv_computational_cost.csv
+cv_hmm_tradeoff.csv
+repeated_seed_sequence_results.csv
+repeated_seed_sequence_per_stage_metrics.csv
+repeated_seed_sequence_cost.csv
+repeated_seed_sequence_summary.csv
+channel_ablation_cv_results.csv
+channel_ablation_cv_summary.csv
+```
+
+## Data note
+
+Do not commit raw Sleep-EDF EDF files, zipped datasets, cache folders, trained models, or generated result folders to GitHub.
 
 The notebook expects the Sleep-EDF Expanded archive in Google Drive by default:
 
@@ -33,44 +59,28 @@ The notebook expects the Sleep-EDF Expanded archive in Google Drive by default:
 /content/drive/MyDrive/sleep-edf-database-expanded-1.0.0.zip
 ```
 
-or an extracted directory:
+For local execution, edit the configuration cell or set local paths in the notebook/script.
+
+## Quick GitHub replacement
+
+See:
 
 ```text
-/content/drive/MyDrive/sleep-edf-database-expanded-1.0.0/
+docs/GITHUB_REPLACE_COMMANDS.md
+replace_original_notebook.sh
 ```
 
-For local execution, edit the paths in the global configuration cell or adapt the exported Python script.
-
-## Quick start
-
-```bash
-python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install --upgrade pip
-pip install -r requirements.txt
-jupyter lab
-```
-
-Open:
+The replacement path is:
 
 ```text
 notebooks/sleep_edf_pipeline_record_boundary_fixed.ipynb
 ```
 
-## Running as a script
+## Recommended workflow
 
-The exported script is mainly for version control and reproducibility review:
-
-```bash
-python scripts/sleep_edf_pipeline_record_boundary_fixed.py
-```
-
-Interactive notebook execution is recommended, especially in Google Colab where Drive mounting and GPU availability are handled more naturally.
-
-## Reproducibility notes
-
-- Random seeds are set in Python, NumPy, and PyTorch.
-- CuDNN benchmarking is disabled for more stable runs.
-- Cross-validation is subject-wise rather than epoch-wise.
-- Sequence windows are constrained within the same record/night to avoid record-boundary leakage.
-- Generated results should be stored under local/Drive output directories and excluded from Git.
+1. Unzip this package.
+2. Review the cleaned notebook locally.
+3. Run the notebook in Colab/GPU runtime.
+4. Confirm the exported CSVs are generated.
+5. Commit the notebook and script to GitHub.
+6. Keep generated outputs and raw data out of Git.

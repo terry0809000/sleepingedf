@@ -1,11 +1,13 @@
-name: Syntax check
+name: syntax-check
 
 on:
-  pull_request:
   push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  py-compile:
+  syntax-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,4 +15,5 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile exported script
-        run: python -m py_compile scripts/sleep_edf_pipeline_record_boundary_fixed.py
+        run: |
+          python -m py_compile scripts/sleep_edf_pipeline_record_boundary_fixed.py
