@@ -1,0 +1,16 @@
+name: Syntax check
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile exported script
+        run: python -m py_compile scripts/sleep_edf_pipeline_record_boundary_fixed.py
