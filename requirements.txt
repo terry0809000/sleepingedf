@@ -1,0 +1,17 @@
+antropy
+hmmlearn
+joblib
+jupyter
+matplotlib
+mne
+numpy
+pandas
+pyEDFlib
+scikit-learn
+scipy
+seaborn
+shap
+torch
+torchvision
+tqdm
+yasa
