@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/project-cover.png" width="100%" alt="Conceptual scientific artwork for Sleep-EDF" /></p>
+
 # Sleep-EDF BSPC Final Strengthened Pipeline
 
 This ZIP is a GitHub-ready replacement package for:
